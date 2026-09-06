@@ -60,3 +60,5 @@ terranova.db
 terranova.db-shm
 terranova.db-wal
 carta-page-*.png
+
+vendor/

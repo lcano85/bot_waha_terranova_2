@@ -2,6 +2,8 @@ const express = require("express");
 const axios = require("axios");
 require("dotenv").config();
 const store = require("./db");
+const alerts = require("./mail/alerts").createAlerts(store.db);
+alerts.start();
 
 const app = express();
 app.use(express.json());
@@ -30,7 +32,7 @@ Tenemos estas opciones para ti:
 Escribe el número de la opción que deseas.`;
 
 function normalizarTexto(texto = "") {
-  return texto.toString().trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return String(texto ?? "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 function fechaLima(fecha = new Date()) {
@@ -181,9 +183,12 @@ app.post("/webhook/waha", async (req, res) => {
   try {
     const evento = req.body;
     if (evento.event !== "message") return;
+    if (evento.session !== WAHA_SESSION) return;
     const payload = evento.payload || {};
     if (payload.fromMe === true) return;
     const chatId = payload.from || payload.chatId;
+    try { alerts.record(evento, sesiones.get(chatId)?.estado); }
+    catch (error) { console.error("[correo] No se pudo guardar alerta:", error.message); }
     const texto = normalizarTexto(payload.body);
     if (!chatId || !texto || chatId.endsWith("@g.us")) return;
     await marcarComoLeido(chatId, payload.id);
