@@ -3,10 +3,10 @@ const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const { createAlerts } = require('./alerts');
 
-function fixture(send = async () => {}) {
+function fixture(send = async () => {}, lookupPhone = async () => null) {
   const db = new DatabaseSync(':memory:');
   let clock = 1800000000000;
-  const options = { enabled: true, send, now: () => clock, logger: { log() {}, error() {} } };
+  const options = { enabled: true, send, lookupPhone, now: () => clock, logger: { log() {}, error() {} } };
   const alerts = createAlerts(db, options);
   return { db, alerts, options, advance: ms => { clock += ms; }, jobs: () => db.prepare('SELECT * FROM mail_queue').all() };
 }
@@ -88,4 +88,62 @@ test('disabled alerts do not queue or send', async () => {
   await alerts.flush();
   assert.equal(f.jobs().length,0);
   f.db.close();
+});
+
+test('resolves LID only while sending and preserves resolved phone for retries', async () => {
+  let lookups = 0;
+  let attempts = 0;
+  const f = fixture(async message => {
+    assert.match(message.body, /Numero: \+51999999999/);
+    assert.match(message.body, /https:\/\/wa.me\/51999999999/);
+    if (++attempts === 1) throw Error('SMTP offline');
+  }, async chat => { assert.equal(chat,'123456789@lid'); lookups++; return '51999999999'; });
+  f.alerts.record(event('1','hola',{from:'123456789@lid'}));
+  assert.equal(lookups,0);
+  await f.alerts.flush();
+  f.advance(60000);
+  await createAlerts(f.db,f.options).flush();
+  assert.equal(lookups,1);
+  assert.equal(f.jobs()[0].status,'sent');
+  f.db.close();
+});
+
+test('unknown phone or lookup failure does not prevent mail delivery', async () => {
+  for (const lookup of [async()=>null, async()=>{throw Error('timeout');}]) {
+    const f = fixture(async message => {
+      assert.match(message.body,/123456789@lid/);
+      assert.doesNotMatch(message.body,/wa\.me/);
+    },lookup);
+    f.alerts.record(event('1',null,{from:'123456789@lid'}));
+    await f.alerts.flush();
+    assert.equal(f.jobs()[0].status,'sent');
+    f.db.close();
+  }
+});
+
+test('WAHA lookup uses negocio_cz and validates the returned mapping', async () => {
+  const { resolvePhone } = require('./contact');
+  for (const [data,expected] of [
+    [{lid:'123@lid',pn:'51999999999@c.us'},'51999999999'],
+    [{lid:'123@lid',pn:null},null],
+    [{lid:'999@lid',pn:'51999999999@c.us'},null],
+    [{lid:'123@lid',pn:'123@lid'},null]
+  ]) {
+    const result=await resolvePhone('123@lid',{fetchImpl:async(url,options)=>{
+      assert.match(url,/\/api\/negocio_cz\/lids\/123%40lid$/);
+      assert.ok(options.signal);
+      return {ok:true,json:async()=>data};
+    }});
+    assert.equal(result,expected);
+  }
+});
+
+test('upgrades the existing queue without losing pending emails', async () => {
+  const db=new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE mail_queue (id INTEGER PRIMARY KEY, subject TEXT, body TEXT, status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, next_attempt INTEGER, created_at INTEGER); INSERT INTO mail_queue(subject,body,next_attempt,created_at) VALUES('old','original',0,0)");
+  let sent=0;
+  const alerts=createAlerts(db,{enabled:true,send:async m=>{assert.equal(m.body,'original');sent++;},lookupPhone:async()=>assert.fail('old records have no chat metadata'),logger:{log(){},error(){}}});
+  await alerts.flush();
+  assert.equal(sent,1);
+  db.close();
 });

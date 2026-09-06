@@ -50,3 +50,7 @@ Las alertas pendientes y los identificadores de eventos se guardan en SQLite par
 La prueba real consiste en enviar un nuevo mensaje al WhatsApp del negocio y comprobar el correo recibido, incluida la carpeta de spam.
 
 Los asuntos de las alertas incluyen [negocio_cz] para distinguir esta cuenta.
+
+### Telefono del contacto en las alertas
+
+Antes de enviar nuevas alertas de contactos @lid se consulta GET /api/negocio_cz/lids/{lid} en WAHA. Si devuelve un telefono valido, se incluye el numero y el enlace https://wa.me/numero. Si no hay numero o la consulta falla, se conserva el identificador. La consulta se realiza en segundo plano, con un limite de cinco segundos. Los correos ya enviados y las alertas antiguas sin metadatos no se modifican.

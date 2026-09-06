@@ -10,3 +10,5 @@
 
 - negocio_cz usa PHPMailer en mail/ y una cola SQLite propia. SMTP: mail.terranovarestobar.com:465 con TLS, usuario info@terranovarestobar.com; destino terranova.restobar.2026@gmail.com. SMTP_PASSWORD solo en .env.
 - Validar con npm test, npm run check:waha y npm run mail:verify. npm run mail:test envia correo real. Reiniciar solo el servicio PM2 terranova-bot-2 al cargar cambios.
+
+- mail/contact.js resuelve @lid usando exclusivamente la sesion negocio_cz antes de enviar nuevas alertas. Conservar el identificador si no hay telefono y no bloquear las respuestas del bot. La cola guarda chat_id y el cuerpo resuelto para reintentos.

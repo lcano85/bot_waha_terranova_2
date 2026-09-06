@@ -1,6 +1,7 @@
 const { sendMail } = require('./php-mailer');
+const { resolvePhone } = require('./contact');
 
-function createAlerts(db, { send = sendMail, now = Date.now, enabled = process.env.EMAIL_ALERTS_ENABLED === 'true', logger = console } = {}) {
+function createAlerts(db, { send = sendMail, lookupPhone = resolvePhone, now = Date.now, enabled = process.env.EMAIL_ALERTS_ENABLED === 'true', logger = console } = {}) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS mail_contacts (chat_id TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS mail_events (event_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
@@ -10,6 +11,9 @@ function createAlerts(db, { send = sendMail, now = Date.now, enabled = process.e
       next_attempt INTEGER NOT NULL, created_at INTEGER NOT NULL
     );
   `);
+  if (!db.prepare('PRAGMA table_info(mail_queue)').all().some(column => column.name === 'chat_id')) {
+    db.exec('ALTER TABLE mail_queue ADD COLUMN chat_id TEXT');
+  }
   let busy = false;
   function record(event, state) {
     if (!enabled || event?.event !== 'message' || event.session !== 'negocio_cz') return false;
@@ -41,7 +45,7 @@ function createAlerts(db, { send = sendMail, now = Date.now, enabled = process.e
         const name = String(p.notifyName || p.pushName || 'No disponible').slice(0, 200);
         const date = new Date(time).toLocaleString('es-PE', { timeZone: 'America/Lima' });
         const body = `${reason}\n\nBot: negocio_cz\nCliente: ${name}\n${phone ? `Numero: +${phone}\nAbrir chat: https://wa.me/${phone}` : `Identificador WhatsApp: ${chat} (no es un numero telefonico)`}\nHora de Peru: ${date}\n\nMensaje:\n${text.slice(0, 6000) || '[Mensaje sin texto: imagen, audio u otro contenido]'}\n\nRevisa WhatsApp para continuar la atencion.`;
-        db.prepare('INSERT INTO mail_queue (subject, body, next_attempt, created_at) VALUES (?, ?, ?, ?)').run(`Terranova — ${reason}`, body, time, time);
+        db.prepare('INSERT INTO mail_queue (subject, body, next_attempt, created_at, chat_id) VALUES (?, ?, ?, ?, ?)').run(`Terranova — ${reason}`, body, time, time, chat);
       }
       // Retain deduplication IDs for seven days; discard sent message content after seven days.
       db.prepare('DELETE FROM mail_events WHERE created_at < ?').run(time - 7 * 86400000);
@@ -57,7 +61,22 @@ function createAlerts(db, { send = sendMail, now = Date.now, enabled = process.e
       const jobs = db.prepare("SELECT * FROM mail_queue WHERE status = 'pending' AND next_attempt <= ? ORDER BY id LIMIT 10").all(now());
       for (const job of jobs) {
         try {
-          await send({ subject: job.subject, body: job.body });
+          let body = job.body;
+          if (job.chat_id?.endsWith('@lid')) {
+            const placeholder = `Identificador WhatsApp: ${job.chat_id} (no es un numero telefonico)`;
+            if (body.includes(placeholder)) {
+              try {
+                const phone = await lookupPhone(job.chat_id);
+                if (/^\d{7,15}$/.test(phone)) {
+                  body = body.replace(placeholder, `Numero: +${phone}\nAbrir chat: https://wa.me/${phone}\nIdentificador WhatsApp: ${job.chat_id}`);
+                  db.prepare('UPDATE mail_queue SET body = ? WHERE id = ?').run(body, job.id);
+                }
+              } catch (error) {
+                logger.error(`[correo] No se pudo consultar el telefono; se enviara el identificador (${error.message})`);
+              }
+            }
+          }
+          await send({ subject: job.subject, body });
           db.prepare("UPDATE mail_queue SET status = 'sent', attempts = attempts + 1 WHERE id = ?").run(job.id);
           logger.log(`[correo] Alerta ${job.id} aceptada por SMTP`);
         } catch (error) {
